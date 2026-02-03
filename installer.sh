@@ -24,16 +24,15 @@ echo
 
 # ---------------- UFW ----------------
 echo "👉 Настраиваю UFW..."
-
 if ! command -v ufw >/dev/null; then
   echo "❌ UFW не установлен. Установи ufw и включи его."
   exit 1
 fi
 
-# разрешаем доступ к Prometheus только с нужного IP
+# Разрешаем Prometheus только с MAIN_IP
 ufw allow from "${MAIN_IP}" to any port "${PROM_PORT}" proto tcp comment 'Prometheus access (restricted)'
 
-# запрещаем всё лишнее
+# Запрещаем всё остальное
 ufw deny "${PROM_PORT}"
 ufw deny 9100
 ufw deny 9639
@@ -44,25 +43,22 @@ echo
 
 # ---------------- DOCKER ----------------
 echo "👉 Проверяю Docker..."
-
 if ! command -v docker >/dev/null; then
   echo "👉 Устанавливаю Docker..."
   curl -fsSL https://get.docker.com | sh
 fi
 
-if ! command -v docker-compose >/dev/null; then
-  echo "👉 Устанавливаю docker-compose..."
-  curl -L https://github.com/docker/compose/releases/download/v2.25.0/docker-compose-$(uname -s)-$(uname -m) \
-    -o /usr/local/bin/docker-compose
-  chmod +x /usr/local/bin/docker-compose
+# Проверка встроенного Compose
+if ! docker compose version >/dev/null 2>&1; then
+  echo "❌ Docker Compose не найден. Docker 3.9+ должен включать встроенный compose."
+  exit 1
 fi
 
 echo "✔ Docker готов"
 echo
 
 # ---------------- FILES ----------------
-echo "👉 Создаю конфигурацию..."
-
+echo "👉 Создаю директории и конфигурацию..."
 mkdir -p "${INSTALL_DIR}"
 cd "${INSTALL_DIR}"
 
@@ -79,6 +75,14 @@ scrape_configs:
   - job_name: xray
     static_configs:
       - targets: ['xray-exporter:9639']
+
+remote_write:
+  - url: http://${MAIN_IP}:${PROM_PORT}/api/v1/write
+    queue_config:
+      capacity: 5000
+      max_shards: 10
+      max_samples_per_send: 1000
+      batch_send_deadline: 5s
 EOF
 
 # docker-compose
@@ -120,15 +124,12 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--web.listen-address=0.0.0.0:9090'
+      - "--web.listen-address=0.0.0.0:9090"
 EOF
-
-echo "✔ Конфигурация готова"
-echo
 
 # ---------------- START ----------------
 echo "👉 Запускаю контейнеры..."
-docker-compose up -d
+docker compose up -d
 
 echo
 echo "✅ УСТАНОВКА ЗАВЕРШЕНА"
@@ -138,7 +139,7 @@ echo "  http://${MAIN_IP}:${PROM_PORT}"
 echo
 echo "Доступ:"
 echo "  ✔ разрешён ТОЛЬКО с ${MAIN_IP}"
-echo "  ✖ exporters извне недоступны"
+echo "  ✖ node_exporter и xray-exporter извне недоступны"
 echo "  ✖ лишние порты закрыты UFW"
 echo
 echo "Docker network: ${DOCKER_NET}"
