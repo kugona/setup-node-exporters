@@ -106,6 +106,7 @@ services:
 
   xray-exporter:
     image: ghcr.io/compassvpn/xray-exporter:latest
+    user: root
     container_name: xray-exporter
     restart: unless-stopped
     networks: [${DOCKER_NET}]
