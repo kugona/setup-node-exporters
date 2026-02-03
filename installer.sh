@@ -1,127 +1,145 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NODE_EXPORTER_VER="1.10.2"
-PROMETHEUS_VER="3.9.1"
-XRAY_EXPORTER_REPO="compassvpn/xray-exporter"
-XRAY_EXPORTER_VER="latest"
-
+PROM_VERSION="3.9.1"
 INSTALL_DIR="/opt/monitoring"
-SYSTEMD_DIR="/etc/systemd/system"
+DOCKER_NET="monitoring"
 
-NODE_PORT=9100
-XRAY_PORT=9639
-PROM_PORT=9090
+echo "=== Установка Prometheus monitoring stack (FINAL) ==="
 
-read -r -p "IP основного сервера с Prometheus/Grafana: " MAIN_PROM_IP
-if [[ ! "$MAIN_PROM_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-    echo "Некорректный IP"
-    exit 1
+# ---------------- INPUT ----------------
+read -r -p "IP сервера, который будет подключаться к Prometheus: " MAIN_IP
+if [[ ! "$MAIN_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  echo "❌ Некорректный IP"
+  exit 1
 fi
 
-read -r -p "Порт основного Prometheus [9090]: " MAIN_PROM_PORT
-MAIN_PROM_PORT=${MAIN_PROM_PORT:-9090}
+read -r -p "Порт Prometheus [9090]: " PROM_PORT
+PROM_PORT=${PROM_PORT:-9090}
 
-read -r -p "Xray API адрес:порт [127.0.0.1:54312]: " XRAY_API_ADDR
-XRAY_API_ADDR=${XRAY_API_ADDR:-"127.0.0.1:54312"}
+read -r -p "Xray API адрес [127.0.0.1:54312]: " XRAY_API
+XRAY_API=${XRAY_API:-127.0.0.1:54312}
 
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
+echo
 
-wget -q "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VER}/node_exporter-${NODE_EXPORTER_VER}.linux-amd64.tar.gz"
-tar -xzf "node_exporter-${NODE_EXPORTER_VER}.linux-amd64.tar.gz" --strip-components=1
-rm "node_exporter-${NODE_EXPORTER_VER}.linux-amd64.tar.gz"
-ln -sf "$INSTALL_DIR/node_exporter" /usr/local/bin/node_exporter
+# ---------------- UFW ----------------
+echo "👉 Настраиваю UFW..."
 
-if [[ "$XRAY_EXPORTER_VER" == "latest" ]]; then
-    ASSET_URL=$(curl -s "https://api.github.com/repos/${XRAY_EXPORTER_REPO}/releases/latest" | grep "browser_download_url.*linux-amd64.*tar.gz" | cut -d '"' -f 4 | head -n1)
-else
-    ASSET_URL="https://github.com/${XRAY_EXPORTER_REPO}/releases/download/${XRAY_EXPORTER_VER}/xray-exporter-${XRAY_EXPORTER_VER}.linux-amd64.tar.gz"
+if ! command -v ufw >/dev/null; then
+  echo "❌ UFW не установлен. Установи ufw и включи его."
+  exit 1
 fi
 
-wget -q "$ASSET_URL" -O xray.tar.gz
-tar -xzf xray.tar.gz --strip-components=1 || tar -xzf xray.tar.gz
-chmod +x xray-exporter
-rm xray.tar.gz
-ln -sf "$INSTALL_DIR/xray-exporter" /usr/local/bin/xray-exporter
+# разрешаем доступ к Prometheus только с нужного IP
+ufw allow from "${MAIN_IP}" to any port "${PROM_PORT}" proto tcp comment 'Prometheus access (restricted)'
 
-wget -q "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VER}/prometheus-${PROMETHEUS_VER}.linux-amd64.tar.gz"
-tar -xzf "prometheus-${PROMETHEUS_VER}.linux-amd64.tar.gz" --strip-components=1
-rm "prometheus-${PROMETHEUS_VER}.linux-amd64.tar.gz"
-ln -sf "$INSTALL_DIR/prometheus" /usr/local/bin/prometheus
-ln -sf "$INSTALL_DIR/promtool" /usr/local/bin/promtool
+# запрещаем всё лишнее
+ufw deny "${PROM_PORT}"
+ufw deny 9100
+ufw deny 9639
 
+ufw reload
+echo "✔ UFW настроен"
+echo
+
+# ---------------- DOCKER ----------------
+echo "👉 Проверяю Docker..."
+
+if ! command -v docker >/dev/null; then
+  echo "👉 Устанавливаю Docker..."
+  curl -fsSL https://get.docker.com | sh
+fi
+
+if ! command -v docker-compose >/dev/null; then
+  echo "👉 Устанавливаю docker-compose..."
+  curl -L https://github.com/docker/compose/releases/download/v2.25.0/docker-compose-$(uname -s)-$(uname -m) \
+    -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+fi
+
+echo "✔ Docker готов"
+echo
+
+# ---------------- FILES ----------------
+echo "👉 Создаю конфигурацию..."
+
+mkdir -p "${INSTALL_DIR}"
+cd "${INSTALL_DIR}"
+
+# Prometheus config
 cat > prometheus.yml <<EOF
 global:
   scrape_interval: 15s
-  evaluation_interval: 15s
 
 scrape_configs:
   - job_name: node
     static_configs:
-      - targets: ['127.0.0.1:${NODE_PORT}']
+      - targets: ['node_exporter:9100']
+
   - job_name: xray
     static_configs:
-      - targets: ['127.0.0.1:${XRAY_PORT}']
-
-remote_write:
-  - url: http://${MAIN_PROM_IP}:${MAIN_PROM_PORT}/api/v1/write
+      - targets: ['xray-exporter:9639']
 EOF
 
-chown -R nobody:nogroup "$INSTALL_DIR" 2>/dev/null || true
+# docker-compose
+cat > docker-compose.yml <<EOF
+version: "3.9"
 
-cat > "${SYSTEMD_DIR}/node-exporter.service" <<EOF
-[Unit]
-Description=Node Exporter
-After=network.target
-[Service]
-User=nobody
-Group=nogroup
-ExecStart=/usr/local/bin/node_exporter --web.listen-address=0.0.0.0:${NODE_PORT}
-Restart=always
-[Install]
-WantedBy=multi-user.target
+networks:
+  ${DOCKER_NET}:
+    driver: bridge
+
+services:
+  node_exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    container_name: node_exporter
+    restart: unless-stopped
+    networks: [${DOCKER_NET}]
+    command:
+      - '--path.rootfs=/host'
+    volumes:
+      - '/:/host:ro,rslave'
+
+  xray-exporter:
+    image: ghcr.io/compassvpn/xray-exporter:latest
+    container_name: xray-exporter
+    restart: unless-stopped
+    networks: [${DOCKER_NET}]
+    command:
+      - '-listen=:9639'
+      - '-xray=http://${XRAY_API}/stats'
+
+  prometheus:
+    image: prom/prometheus:v${PROM_VERSION}
+    container_name: prometheus
+    restart: unless-stopped
+    networks: [${DOCKER_NET}]
+    ports:
+      - "0.0.0.0:${PROM_PORT}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.listen-address=0.0.0.0:9090'
 EOF
 
-cat > "${SYSTEMD_DIR}/xray-exporter.service" <<EOF
-[Unit]
-Description=Xray Exporter
-After=network.target
-[Service]
-User=nobody
-Group=nogroup
-ExecStart=/usr/local/bin/xray-exporter -listen :${XRAY_PORT} -xray http://${XRAY_API_ADDR}/stats
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
+echo "✔ Конфигурация готова"
+echo
 
-cat > "${SYSTEMD_DIR}/prometheus.service" <<EOF
-[Unit]
-Description=Prometheus
-After=network.target
-[Service]
-User=nobody
-Group=nogroup
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=/usr/local/bin/prometheus \
-  --config.file=${INSTALL_DIR}/prometheus.yml \
-  --storage.tsdb.path=${INSTALL_DIR}/data \
-  --web.listen-address=0.0.0.0:${PROM_PORT} \
-  --web.enable-lifecycle
-Restart=always
-LimitNOFILE=65536
-[Install]
-WantedBy=multi-user.target
-EOF
+# ---------------- START ----------------
+echo "👉 Запускаю контейнеры..."
+docker-compose up -d
 
-systemctl daemon-reload
-
-for svc in node-exporter xray-exporter prometheus; do
-    systemctl enable --now "$svc" >/dev/null 2>&1
-done
-
-echo "Установка завершена"
-echo "Prometheus: http://<IP>:${PROM_PORT}"
-echo "Метрики: :${NODE_PORT}/metrics   :${XRAY_PORT}/metrics"
-echo "remote_write → ${MAIN_PROM_IP}:${MAIN_PROM_PORT}"
+echo
+echo "✅ УСТАНОВКА ЗАВЕРШЕНА"
+echo
+echo "Prometheus доступен:"
+echo "  http://${MAIN_IP}:${PROM_PORT}"
+echo
+echo "Доступ:"
+echo "  ✔ разрешён ТОЛЬКО с ${MAIN_IP}"
+echo "  ✖ exporters извне недоступны"
+echo "  ✖ лишние порты закрыты UFW"
+echo
+echo "Docker network: ${DOCKER_NET}"
+echo
