@@ -125,7 +125,7 @@ maxretry = 3
 bantime = 3600
 findtime = 600
 logtarget = SYSLOG
-backend = auto
+backend = systemd
 
 [sshd]
 enabled = true
