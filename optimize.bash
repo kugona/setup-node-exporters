@@ -105,8 +105,8 @@ if [[ "$UFW_STATUS" == "Status: active" ]]; then
         iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     fi
 
-    # Перебираем каждое правило UFW
-    ufw status | tail -n +2 | grep -v '^$' | while read -r line; do
+    # Перебираем каждое правило UFW, пропуская заголовок
+    ufw status | tail -n +3 | grep -E "/tcp|/udp" | while read -r line; do
         PORTPROTO=$(echo "$line" | awk '{print $1}')     # 22/tcp
         ACTION=$(echo "$line" | awk '{print $2}')        # ALLOW / DENY
         FROM=$(echo "$line" | awk '{print $3}')          # Anywhere или IP
