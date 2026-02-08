@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-echo "🚀 Полная оптимизация сервера (VPN + Fail2Ban + UFW → iptables)"
+echo "🚀 Полная оптимизация сервера (VPN + Fail2Ban)"
 echo "🖥️ ОС: $(. /etc/os-release && echo $PRETTY_NAME)"
 echo "🧠 Ядро: $(uname -r)"
 echo
@@ -88,76 +88,7 @@ fi
 echo
 
 # ----------------------
-# 4️⃣ Миграция правил UFW → iptables
-# ----------------------
-echo "🔄 Проверяем UFW и переносим правила в iptables..."
-if ufw status | grep -q "Status: active"; then
-    echo "⚠️ UFW активен — переносим правила в iptables"
-
-    # Создаём базовую политику iptables, если пусто
-    if [ $(iptables -L -n | wc -l) -le 8 ]; then
-        echo "📌 Устанавливаем базовую политику DROP"
-        iptables -P INPUT DROP
-        iptables -P FORWARD DROP
-        iptables -P OUTPUT ACCEPT
-        iptables -A INPUT -i lo -j ACCEPT
-        iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    fi
-
-    # Читаем правила ufw, пропуская заголовки
-    ufw status | sed -n '/^--/,$p' | tail -n +2 | while read -r line; do
-        # Игнорируем пустые строки
-        [[ -z "$line" ]] && continue
-
-        # Извлекаем PORT/PROTO, ACTION и FROM
-        PORTPROTO=$(echo "$line" | awk '{print $1}')
-        ACTION=$(echo "$line" | awk '{print $2}')
-        FROM=$(echo "$line" | awk '{for(i=3;i<=NF;i++) printf $i " "; print ""}' | xargs)
-
-        # Пропускаем некорректные строки
-        if [[ "$PORTPROTO" != */* ]]; then
-            echo "⚠️ Пропускаем некорректное правило: $line"
-            continue
-        fi
-
-        PORT=$(echo "$PORTPROTO" | cut -d'/' -f1)
-        PROTO=$(echo "$PORTPROTO" | cut -d'/' -f2)
-
-        # Конвертируем ACTION
-        if [[ "$ACTION" == "ALLOW" ]]; then
-            TARGET="ACCEPT"
-        elif [[ "$ACTION" == "DENY" ]]; then
-            TARGET="DROP"
-        else
-            TARGET="ACCEPT"
-        fi
-
-        # Источник
-        [[ "$FROM" == "Anywhere" || "$FROM" == "Anywhere (v4)" ]] && FROM="0.0.0.0/0"
-        [[ "$FROM" == "Anywhere (v6)" ]] && FROM="::/0"
-
-        echo "➡️ Применяем правило: $PORT/$PROTO $TARGET from $FROM"
-        iptables -C INPUT -p "$PROTO" --dport "$PORT" -s "$FROM" -j "$TARGET" 2>/dev/null || \
-        iptables -A INPUT -p "$PROTO" --dport "$PORT" -s "$FROM" -j "$TARGET"
-    done
-
-    # Сохраняем правила навсегда
-    echo "💾 Сохраняем правила iptables"
-    apt install -y iptables-persistent > /dev/null
-    iptables-save > /etc/iptables/rules.v4
-    echo "✅ Правила iptables сохранены"
-
-    # Отключаем и удаляем ufw
-    echo "🧹 Отключаем и удаляем UFW"
-    ufw disable
-    apt remove -y ufw
-else
-    echo "✅ UFW неактивен — ничего переносить не нужно"
-fi
-echo
-
-# ----------------------
-# 5️⃣ Отключение лишних сервисов
+# 4️⃣ Отключение лишних сервисов
 # ----------------------
 echo "🧹 Отключаем systemd-resolved и firewalld"
 systemctl disable --now systemd-resolved 2>/dev/null || true
@@ -166,7 +97,7 @@ echo "✅ Лишние сервисы отключены"
 echo
 
 # ----------------------
-# 6️⃣ nf_conntrack tuning
+# 5️⃣ nf_conntrack tuning
 # ----------------------
 echo "⚡ Настройка nf_conntrack"
 cat <<EOF > /etc/sysctl.d/99-vpn-conntrack.conf
@@ -180,7 +111,7 @@ echo "✅ nf_conntrack оптимизирован"
 echo
 
 # ----------------------
-# 7️⃣ Установка Fail2Ban
+# 6️⃣ Установка Fail2Ban
 # ----------------------
 echo "📦 Устанавливаем и настраиваем Fail2Ban"
 apt update -y
@@ -207,7 +138,7 @@ echo "🔄 Перезапускаем fail2ban"
 systemctl enable --now fail2ban
 
 # ----------------------
-# 8️⃣ Итог
+# 7️⃣ Итог
 # ----------------------
 echo
 echo "🎉 Оптимизация завершена!"
@@ -215,7 +146,6 @@ echo "🔍 Проверка:"
 echo "  sysctl net.ipv4.tcp_congestion_control"
 echo "  ulimit -n"
 echo "  ss -s"
-echo "  iptables -L -n -v"
 echo "  fail2ban-client status"
 echo "  fail2ban-client status sshd"
 echo
