@@ -91,8 +91,7 @@ echo
 # 4️⃣ Миграция правил UFW → iptables
 # ----------------------
 echo "🔄 Проверяем UFW и переносим правила в iptables..."
-UFW_STATUS=$(ufw status numbered 2>/dev/null | head -n1 || echo "inactive")
-if [[ "$UFW_STATUS" == "Status: active" ]]; then
+if ufw status | grep -q "Status: active"; then
     echo "⚠️ UFW активен — переносим правила в iptables"
 
     # Создаём базовую политику iptables, если пусто
@@ -105,20 +104,24 @@ if [[ "$UFW_STATUS" == "Status: active" ]]; then
         iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     fi
 
-    # Перебираем каждое правило UFW, пропуская заголовок
-    ufw status | tail -n +3 | grep -E "/tcp|/udp" | while read -r line; do
-        PORTPROTO=$(echo "$line" | awk '{print $1}')     # 22/tcp
-        ACTION=$(echo "$line" | awk '{print $2}')        # ALLOW / DENY
-        FROM=$(echo "$line" | awk '{print $3}')          # Anywhere или IP
+    # Читаем правила ufw, пропуская заголовки
+    ufw status | sed -n '/^--/,$p' | tail -n +2 | while read -r line; do
+        # Игнорируем пустые строки
+        [[ -z "$line" ]] && continue
+
+        # Извлекаем PORT/PROTO, ACTION и FROM
+        PORTPROTO=$(echo "$line" | awk '{print $1}')
+        ACTION=$(echo "$line" | awk '{print $2}')
+        FROM=$(echo "$line" | awk '{for(i=3;i<=NF;i++) printf $i " "; print ""}' | xargs)
+
+        # Пропускаем некорректные строки
+        if [[ "$PORTPROTO" != */* ]]; then
+            echo "⚠️ Пропускаем некорректное правило: $line"
+            continue
+        fi
 
         PORT=$(echo "$PORTPROTO" | cut -d'/' -f1)
         PROTO=$(echo "$PORTPROTO" | cut -d'/' -f2)
-
-        # Пропускаем некорректные строки
-        if [[ -z "$PORT" || -z "$PROTO" ]]; then
-            echo "⚠️ Пропускаем правило: $line"
-            continue
-        fi
 
         # Конвертируем ACTION
         if [[ "$ACTION" == "ALLOW" ]]; then
@@ -130,7 +133,8 @@ if [[ "$UFW_STATUS" == "Status: active" ]]; then
         fi
 
         # Источник
-        [[ "$FROM" == "Anywhere" ]] && FROM="0.0.0.0/0"
+        [[ "$FROM" == "Anywhere" || "$FROM" == "Anywhere (v4)" ]] && FROM="0.0.0.0/0"
+        [[ "$FROM" == "Anywhere (v6)" ]] && FROM="::/0"
 
         echo "➡️ Применяем правило: $PORT/$PROTO $TARGET from $FROM"
         iptables -C INPUT -p "$PROTO" --dport "$PORT" -s "$FROM" -j "$TARGET" 2>/dev/null || \
